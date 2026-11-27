@@ -1,0 +1,12 @@
+name: Player{number}
+description: The Riftbreaker (open campaign)
+game: The Riftbreaker
+requires:
+  version: 0.6.4
+
+The Riftbreaker:
+  progression_balancing: 50
+  accessibility: full
+
+  # arcology: complete the Arcology assembly. prime_rift: build the Prime Rift Station and return to Earth.
+  goal: arcology
