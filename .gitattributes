@@ -1,0 +1,2 @@
+# Store every file byte-for-byte: the mod ships game data files whose line endings must stay as generated.
+* -text
