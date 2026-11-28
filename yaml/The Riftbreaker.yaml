@@ -1,5 +1,5 @@
 name: Player{number}
-description: The Riftbreaker (open campaign)
+description: The Riftbreaker
 game: The Riftbreaker
 requires:
   version: 0.6.4
@@ -8,5 +8,27 @@ The Riftbreaker:
   progression_balancing: 50
   accessibility: full
 
-  # arcology: complete the Arcology assembly. prime_rift: build the Prime Rift Station and return to Earth.
+  # open: the open campaign. story: the story campaign. survival: one survival map.
+  game_mode: open
+
+  # Open and story: arcology (complete the Arcology assembly) or prime_rift (return to Earth).
   goal: arcology
+
+  # Survival only: which map (it must be unlocked in your game profile), and a check every N minutes survived
+  # (up to 90; 0 = no time checks).
+  survival_map: desert
+  survival_time_interval: 10
+
+  # Headquarters levels, Laboratory, Planetary Scanner, Rare Element Mine and megastructures are checks.
+  build_checks: 'true'
+  # Open campaign: arriving in each non-Jungle biome is a check.
+  biome_arrival_checks: 'true'
+  # Story campaign: completing each base story mission is a check.
+  mission_checks: 'true'
+
+  # Put key progression (Orbital Scanning, Cobalt Handling, Laboratory, first HQ upgrade) in sphere 1.
+  # off / early (anywhere in the multiworld) / local (your own world)
+  early_progression: 'off'
+
+  # Deposit and withdraw resources or electricity through the shared Energy Link pool.
+  energy_link: 'true'

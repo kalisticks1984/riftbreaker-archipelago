@@ -4,13 +4,15 @@ The game's Lua has no networking or file writing, so the client and the in-game 
 
 game -> client
   Documents/The Riftbreaker/exor_logs.txt (the game's log). The mod writes lines like
-    [AP] HELLO 1 | BOUND <session> | MISMATCH <session> | CHECKS id,id | CHECK id | BIOME acid | GOAL arcology
+    [AP] HELLO 3 | MODE story | BOUND <session> | CHECKS id,id | CHECK id | BIOME acid | SURVIVE 1260 |
+    GOAL arcology | EL_DEPOSIT <seq> carbonium 500 | EL_WITHDRAW <seq> energy 2000
 client -> game
   <game>/archipelago/inbox.lua, which the mod loads every 2 seconds:
-    return { session = "<seed>:<slot>", items = { <item id>, ... } }
+    return { session, connected, player, mode, survival_map, energy_link, energy, items, labels, grants, tracker }
+  <game>/mods/Archipelago/gui/archipelago_localizations.csv: this seed's research labels (read at game start)
 
-A campaign is bound to the first slot that connects to it. Reports from a campaign bound to a different slot
-are ignored, so an old save never sends checks to a new seed.
+A campaign is bound to the first slot that connects to it; reports from a campaign bound to another slot are ignored.
+In co-op only the host runs this client: everyone in the session shares the slot.
 """
 import asyncio
 import ctypes
@@ -21,7 +23,7 @@ import pkgutil
 import re
 import shutil
 import zipfile
-from typing import Optional, Set
+from typing import Dict, List, Optional, Set
 
 import Utils
 from CommonClient import ClientCommandProcessor, CommonContext, get_base_parser, gui_enabled, logger, server_loop
@@ -34,12 +36,17 @@ GAME_FOLDER = "Riftbreaker"
 GAME_EXE = os.path.join("bin", "riftbreaker_win_release.exe")
 MOD_FOLDER = "Archipelago"
 LOCALIZATION_FILE = "gui/archipelago_localizations.csv"
+LEGACY_MOD_FILES = ["{6F1D2A5C-3B8E-4C7A-9E21-5A0B7C4D8E13}" + ext for ext in (".zip", ".crc", ".manifest")]
 LOC_HEADER = ";ENGLISH;POLISH;RUSSIAN;FRENCH;GERMAN;SPANISH;BRASILIAN;CHINESE_SP;JAPANESE;KOREAN"
 RESEARCH_NAME_KEY = "gui/menu/research/name/"
 RESEARCH_DESC_KEY = "gui/menu/research/description/"
 FLAG_PROGRESSION, FLAG_USEFUL, FLAG_TRAP = 0b001, 0b010, 0b100
-LEGACY_MOD_FILES = ["{6F1D2A5C-3B8E-4C7A-9E21-5A0B7C4D8E13}" + ext for ext in (".zip", ".crc", ".manifest")]
 LINE_RE = re.compile(r"\[AP\] ([A-Z_]+) ?([^\r\n]*)")
+
+# Energy Link exchange rates: Energy Link units (J) per unit of each resource.
+EL_RATES = {"carbonium": 100_000, "steel": 100_000, "cobalt": 500_000, "palladium": 1_000_000,
+            "titanium": 1_000_000, "uranium": 2_000_000, "energy": 10_000}
+EL_NAMES = {"steel": "ironium"}
 
 
 # ------------------------------------------------------------------ paths
@@ -135,12 +142,22 @@ def install_mod(game_dir: str) -> str:
     return "Installed the Archipelago mod into the game's mods folder (restart the game if it was running)."
 
 
+def format_joules(value: float) -> str:
+    for unit, scale in (("TJ", 1e12), ("GJ", 1e9), ("MJ", 1e6), ("kJ", 1e3)):
+        if abs(value) >= scale:
+            return f"{value / scale:.2f} {unit}"
+    return f"{value:.0f} J"
+
+
 # ------------------------------------------------------------------ game state from the log
 class GameState:
     def __init__(self) -> None:
         self.bound: Optional[str] = None
         self.mismatch: Optional[str] = None
-        self.research: Set[int] = set()
+        self.mode: Optional[str] = None
+        self.done: Set[int] = set()
+        self.biomes: Set[str] = set()
+        self.survival_seconds = 0
         self.goals: Set[str] = set()
         self.hello = False
 
@@ -165,12 +182,21 @@ class RiftbreakerCommandProcessor(ClientCommandProcessor):
         st = ctx.rb_state
         self.output(f"Game folder: {ctx.game_dir}")
         self.output(f"Game log: {ctx.log_path} ({'found' if os.path.exists(ctx.log_path) else 'missing'})")
+        self.output(f"Slot mode: {ctx.rb_slot.get('game_mode', '?')}; game mode: {st.mode or '(not seen)'}")
         self.output(f"Campaign bound to: {st.bound or '(not yet)'}; this slot: {ctx.session or '(not connected)'}")
         if st.mismatch:
-            self.output(f"The loaded campaign belongs to another slot ({st.mismatch}). Start a new open campaign.")
+            self.output(f"The loaded campaign belongs to another slot ({st.mismatch}). Start a new game.")
         self.output(f"Mod running in the game: {'yes' if st.hello else 'not seen in the current log'}")
-        self.output(f"Research checks seen: {len(st.research)}")
-        self.output(f"Items received: {len(ctx.items_received)}")
+        self.output(f"Checks seen: {len(ctx.found_locations())}; items received: {len(ctx.items_received)}")
+        if ctx.rb_slot.get("energy_link"):
+            self.output(f"Energy Link pool: {format_joules(ctx.el_value or 0)}")
+        return True
+
+    def _cmd_tracker(self) -> bool:
+        """List the non-research checks and what is in logic."""
+        ctx: RiftbreakerContext = self.ctx
+        for line in ctx.tracker_lines(include_research=False):
+            self.output(line)
         return True
 
     def _cmd_resync(self) -> bool:
@@ -192,10 +218,14 @@ class RiftbreakerContext(CommonContext):
         self.rb_state = GameState()
         self.rb_slot: dict = {}
         self.rb_seed: Optional[str] = None
+        self.logic: Optional[D.Logic] = None
+        self.location_reqs: Dict[str, D.Req] = {}
         self.log_pos = 0
         self.log_ctime = None
         self.goal_sent = False
         self.warned_mismatch = None
+        self.el_value: Optional[float] = None
+        self.tracker_widget = None
 
     # ---- settings / paths
     def load_settings(self) -> dict:
@@ -225,6 +255,15 @@ class RiftbreakerContext(CommonContext):
             return None
         return f"{seed}:{self.slot}"
 
+    @property
+    def el_key(self) -> str:
+        return f"EnergyLink{self.team}"
+
+    def el_state(self) -> dict:
+        """Per-session Energy Link bookkeeping, persisted so requests are never applied twice."""
+        store = self.rb_settings.setdefault("energy_link", {})
+        return store.setdefault(self.session or "?", {"done": 0, "grants": []})
+
     # ---- AP callbacks
     async def server_auth(self, password_requested: bool = False):
         if password_requested and not self.password:
@@ -239,22 +278,72 @@ class RiftbreakerContext(CommonContext):
             self.rb_slot = args.get("slot_data", {}) or {}
             if self.rb_slot.get("protocol") != D.PROTOCOL:
                 logger.warning("This slot was generated with a different version of the Riftbreaker apworld.")
-            # Ask what every research location holds, to label the research tree.
+            self.logic = D.Logic(self.rb_slot.get("game_mode", "open"), self.rb_slot.get("survival_map", "desert"))
+            self.location_reqs = self.logic.locations(self.rb_slot)
             locations = sorted(set(self.missing_locations) | set(self.checked_locations))
+            msgs = []
             if locations:
-                asyncio.create_task(self.send_msgs([{"cmd": "LocationScouts", "locations": locations,
-                                                     "create_as_hint": 0}]))
+                msgs.append({"cmd": "LocationScouts", "locations": locations, "create_as_hint": 0})
+            if self.rb_slot.get("energy_link"):
+                self.tags.add("EnergyLink")
+                msgs += [{"cmd": "ConnectUpdate", "tags": sorted(self.tags)},
+                         {"cmd": "SetNotify", "keys": [self.el_key]},
+                         {"cmd": "Get", "keys": [self.el_key]}]
+            if msgs:
+                asyncio.create_task(self.send_msgs(msgs))
         elif cmd == "LocationInfo":
-            # CommonContext has already stored these as NetworkItems in locations_info.
             self.write_research_labels(list(self.locations_info.values()))
+        elif cmd == "Retrieved":
+            if self.el_key in args.get("keys", {}):
+                self.el_value = float(args["keys"][self.el_key] or 0)
+        elif cmd == "SetReply":
+            if args.get("key") == self.el_key:
+                self.el_value = float(args.get("value") or 0)
+                if "riftbreaker_seq" in args:
+                    self.finish_withdraw(args)
         self.write_inbox()
 
+    async def connection_closed(self):
+        await super().connection_closed()
+        self.write_inbox()
+
+    async def shutdown(self):
+        self.write_inbox(force_disconnected=True)
+        await super().shutdown()
+
+    def run_gui(self):
+        from kvui import GameManager
+
+        ctx = self
+
+        class RiftbreakerManager(GameManager):
+            logging_pairs = [("Client", "Archipelago")]
+            base_title = "Archipelago The Riftbreaker Client"
+
+            def build(self):
+                container = super().build()
+                from kivy.uix.label import Label
+                from kivy.uix.scrollview import ScrollView
+                scroll = ScrollView(do_scroll_x=False)
+                label = Label(text="Connect to see the tracker.", markup=True, size_hint_y=None,
+                              halign="left", valign="top", padding=(12, 12))
+                label.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)),
+                           texture_size=lambda inst, s: setattr(inst, "height", s[1]))
+                scroll.add_widget(label)
+                self.add_client_tab("Tracker", scroll)
+                ctx.tracker_widget = label
+                return container
+
+        self.ui = RiftbreakerManager(self)
+        self.ui_task = asyncio.create_task(self.ui.async_run(), name="UI")
+
+    # ---- research labels
     def write_research_labels(self, infos) -> None:
         """Write the research tree's names/descriptions for this seed into the mod's localization file.
         The game reads localization when it starts, so changes show after a game restart."""
-        if not self.game_dir:
+        if not self.game_dir or not self.logic:
             return
-        node_by_loc = {n["id"]: n for n in D.RANDOMIZED}
+        node_by_loc = {n["location_id"]: n for n in self.logic.randomized}
         rows = [LOC_HEADER]
         for info in infos:
             node = node_by_loc.get(info.location)
@@ -273,8 +362,7 @@ class RiftbreakerContext(CommonContext):
             else:
                 worth = "filler"
             target = "you" if own else receiver
-            desc = (f"Archipelago check. Completing this research sends {item} to {target}. "
-                    f"This item is {worth}.")
+            desc = f"Archipelago check. Completing this research sends {item} to {target}. This item is {worth}."
             clean = lambda s: s.replace(";", ",").replace("\r", " ").replace("\n", " ")
             rows.append(f"{RESEARCH_NAME_KEY}{node['name']};{clean(name)};;;;;;;;;")
             rows.append(f"{RESEARCH_DESC_KEY}{node['name']};{clean(desc)};;;;;;;;;")
@@ -294,23 +382,81 @@ class RiftbreakerContext(CommonContext):
         logger.info(f"Research tree now shows this seed's items ({len(rows) // 2} research). "
                     "If The Riftbreaker is already running, restart it to see them.")
 
-    async def connection_closed(self):
-        await super().connection_closed()
-        self.write_inbox()
+    # ---- tracker
+    def item_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for i in self.items_received:
+            name = self.item_names.lookup_in_game(i.item)
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
-    async def shutdown(self):
-        self.write_inbox(force_disconnected=True)
-        await super().shutdown()
+    def in_logic(self, req: D.Req, counts: Dict[str, int]) -> bool:
+        items, groups = req
+        has = lambda needs: all(counts.get(n, 0) >= c for n, c in needs)
+        if not has(items):
+            return False
+        return all(any(has(self.logic.biome_req(b)[0]) for b in g) for g in groups)
 
-    def run_gui(self):
-        from kvui import GameManager
+    def tracker_lines(self, include_research: bool = True) -> List[str]:
+        if not self.logic:
+            return ["Not connected."]
+        counts = self.item_counts()
+        checked = set(self.checked_locations)
+        sections: Dict[str, List[str]] = {}
+        research = [0, 0, 0]   # done, in logic, total
+        for name, req in self.location_reqs.items():
+            loc_id = D.LOCATION_NAME_TO_ID[name]
+            done = loc_id in checked
+            ok = done or self.in_logic(req, counts)
+            if name.startswith("Research: "):
+                research[0] += done
+                research[1] += ok and not done
+                research[2] += 1
+                if not include_research:
+                    continue
+                section = "Research"
+            elif name.startswith("Survive "):
+                section = "Survival time"
+            elif name.startswith("Arrive in "):
+                section = "Biome arrivals"
+            elif name.startswith("Complete "):
+                section = "Story missions"
+            else:
+                section = "Builds"
+            mark = "[done]" if done else ("[in logic]" if ok else "[locked]")
+            sections.setdefault(section, []).append(f"{mark} {name}")
+        lines = [f"Research: {research[0]}/{research[2]} done, {research[1]} more in logic"]
+        order = ["Builds", "Story missions", "Biome arrivals", "Survival time", "Research"]
+        for section in order:
+            if section in sections:
+                entries = sections[section]
+                lines.append(f"{section} ({sum(e.startswith('[done]') for e in entries)}/{len(entries)}):")
+                lines += ["  " + e for e in sorted(entries, key=lambda e: (not e.startswith('[in'), e))]
+        return lines
 
-        class RiftbreakerManager(GameManager):
-            logging_pairs = [("Client", "Archipelago")]
-            base_title = "Archipelago The Riftbreaker Client"
+    def tracker_summary(self) -> str:
+        """One line for the in-game ap_tracker command."""
+        if not self.logic:
+            return ""
+        counts = self.item_counts()
+        checked = set(self.checked_locations)
+        parts: Dict[str, List[int]] = {}
+        for name, req in self.location_reqs.items():
+            kind = ("Research" if name.startswith("Research: ") else "Survival" if name.startswith("Survive ")
+                    else "Arrivals" if name.startswith("Arrive in ") else "Missions" if name.startswith("Complete ")
+                    else "Builds")
+            p = parts.setdefault(kind, [0, 0, 0])
+            done = D.LOCATION_NAME_TO_ID[name] in checked
+            p[0] += done
+            p[1] += (not done) and self.in_logic(req, counts)
+            p[2] += 1
+        return "Archipelago: " + " | ".join(f"{k} {v[0]}/{v[2]} ({v[1]} in logic)" for k, v in parts.items())
 
-        self.ui = RiftbreakerManager(self)
-        self.ui_task = asyncio.create_task(self.ui.async_run(), name="UI")
+    def refresh_tracker(self) -> None:
+        if self.tracker_widget is not None and self.logic:
+            text = "\n".join(self.tracker_lines())
+            if self.tracker_widget.text != text:
+                self.tracker_widget.text = text
 
     # ---- client -> game
     def write_inbox(self, force_disconnected: bool = False) -> None:
@@ -327,10 +473,52 @@ class RiftbreakerContext(CommonContext):
             name = self.item_names.lookup_in_game(i.item)
             sender = self.player_names.get(i.player, "?")
             labels.append(lua_string(name if i.player == self.slot else f"{name} (from {sender})"))
-        text = (f"return {{ session = {lua_string(self.session)}, connected = {'true' if connected else 'false'}, "
-                f"player = {lua_string(self.auth or '')},\n  items = {{ {ids} }},\n"
-                f"  labels = {{ {', '.join(labels)} }} }}\n")
+        grants = ", ".join(f"{{ {g[0]}, {lua_string(g[1])}, {g[2]} }}" for g in self.el_state()["grants"])
+        energy = lua_string(format_joules(self.el_value)) if self.el_value is not None else "nil"
+        text = (f"return {{ session = {lua_string(self.session)}, connected = {'true' if connected else 'false'},\n"
+                f"  player = {lua_string(self.auth or '')}, mode = {lua_string(self.rb_slot.get('game_mode', 'open'))},\n"
+                f"  survival_map = {lua_string(self.rb_slot.get('survival_map', ''))},\n"
+                f"  energy_link = {'true' if self.rb_slot.get('energy_link') else 'false'}, energy = {energy},\n"
+                f"  tracker = {lua_string(self.tracker_summary())},\n"
+                f"  items = {{ {ids} }},\n  labels = {{ {', '.join(labels)} }},\n  grants = {{ {grants} }} }}\n")
         write_atomic(os.path.join(box, "inbox.lua"), text)
+
+    # ---- Energy Link
+    def energy_link_request(self, kind: str, seq: int, resource: str, amount: int) -> None:
+        state = self.el_state()
+        if seq <= state["done"] or resource not in EL_RATES or not self.rb_slot.get("energy_link"):
+            return
+        state["done"] = seq
+        self.save_settings()
+        joules = amount * EL_RATES[resource]
+        if kind == "deposit":
+            asyncio.create_task(self.send_msgs([{"cmd": "Set", "key": self.el_key, "default": 0, "want_reply": True,
+                                                 "operations": [{"operation": "add", "value": joules}]}]))
+            logger.info(f"Energy Link: deposited {amount} {EL_NAMES.get(resource, resource)} ({format_joules(joules)}).")
+        else:
+            asyncio.create_task(self.send_msgs([{
+                "cmd": "Set", "key": self.el_key, "default": 0, "want_reply": True,
+                "operations": [{"operation": "add", "value": -joules}, {"operation": "max", "value": 0}],
+                "riftbreaker_seq": seq, "riftbreaker_resource": resource, "riftbreaker_amount": amount}]))
+
+    def finish_withdraw(self, args: dict) -> None:
+        state = self.el_state()
+        seq = int(args["riftbreaker_seq"])
+        if any(g[0] == seq for g in state["grants"]):
+            return
+        resource = args.get("riftbreaker_resource", "carbonium")
+        rate = EL_RATES.get(resource, 1)
+        given = max(0.0, float(args.get("original_value") or 0) - float(args.get("value") or 0))
+        units = int(given // rate)
+        leftover = given - units * rate
+        if leftover > 0:   # return what could not buy a whole unit
+            asyncio.create_task(self.send_msgs([{"cmd": "Set", "key": self.el_key, "default": 0,
+                                                 "operations": [{"operation": "add", "value": leftover}]}]))
+        state["grants"].append([seq, resource, units])
+        state["grants"] = state["grants"][-50:]
+        self.save_settings()
+        logger.info(f"Energy Link: withdrew {units} {EL_NAMES.get(resource, resource)} "
+                    f"(asked for {args.get('riftbreaker_amount')}).")
 
     # ---- game -> client
     def read_log(self) -> None:
@@ -359,27 +547,54 @@ class RiftbreakerContext(CommonContext):
         st = self.rb_state
         if kind == "HELLO":                     # new map or save loaded: forget the previous binding
             st.bound, st.mismatch, st.hello = None, None, True
+        elif kind == "MODE":
+            st.mode = arg
         elif kind == "BOUND":
             st.bound, st.mismatch = arg, None
         elif kind == "MISMATCH":
             st.bound, st.mismatch = None, arg
             if self.warned_mismatch != arg:
                 self.warned_mismatch = arg
-                logger.warning("The loaded campaign belongs to a different slot or seed. "
-                               "Start a new open campaign for this slot.")
+                logger.warning("The loaded campaign belongs to a different slot or seed. Start a new game.")
         elif st.bound and st.bound == self.session:
             if kind in ("CHECKS", "CHECK"):
-                st.research |= {int(x) for x in arg.split(",") if x.strip().isdigit()}
+                st.done |= {int(x) for x in arg.split(",") if x.strip().isdigit()}
+            elif kind == "BIOME":
+                st.biomes.add(arg)
+            elif kind == "SURVIVE" and arg.isdigit():
+                st.survival_seconds = max(st.survival_seconds, int(arg))
             elif kind == "GOAL":
                 st.goals.add(arg)
+            elif kind in ("EL_DEPOSIT", "EL_WITHDRAW"):
+                parts = arg.split()
+                if len(parts) == 3 and parts[0].isdigit() and parts[2].isdigit():
+                    self.energy_link_request("deposit" if kind == "EL_DEPOSIT" else "withdraw",
+                                             int(parts[0]), parts[1], int(parts[2]))
+
+    def found_locations(self) -> Set[int]:
+        st = self.rb_state
+        out = set(st.done)
+        if self.rb_slot.get("game_mode") == "open" and self.rb_slot.get("biome_arrival_checks"):
+            out |= {D.BIOME_LOCATION_ID[b] for b in st.biomes if b in D.BIOME_LOCATION_ID}
+        if self.rb_slot.get("game_mode") == "survival":
+            step = int(self.rb_slot.get("survival_time_interval", 0))
+            if step > 0:
+                minutes = st.survival_seconds // 60
+                out |= {D.SURVIVAL_TIME_BASE + m for m in range(step, min(minutes, D.SURVIVAL_MAX_MINUTES) + 1, step)}
+        return out
+
+    def goal_reached(self) -> bool:
+        if self.rb_slot.get("game_mode") == "survival":
+            return "survival" in self.rb_state.goals
+        return self.rb_slot.get("goal") in self.rb_state.goals
 
     async def sync(self) -> None:
         if not self.rb_slot or self.server is None or self.server.socket.closed:
             return
-        new = self.rb_state.research & self.missing_locations
+        new = self.found_locations() & self.missing_locations
         if new:
             await self.send_msgs([{"cmd": "LocationChecks", "locations": sorted(new)}])
-        if not self.goal_sent and self.rb_slot.get("goal") in self.rb_state.goals:
+        if not self.goal_sent and self.goal_reached():
             self.goal_sent = True
             await self.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
 
@@ -400,6 +615,7 @@ async def bridge_loop(ctx: RiftbreakerContext) -> None:
                 ctx.write_inbox()
                 ctx.read_log()
                 await ctx.sync()
+                ctx.refresh_tracker()
         except Exception as e:   # keep the bridge alive
             logger.exception(f"Bridge error: {e}")
         await asyncio.sleep(1)

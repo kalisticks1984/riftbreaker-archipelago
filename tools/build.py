@@ -28,7 +28,7 @@ DIST = os.path.join(PROJECT, "dist")
 CUSTOM_WORLDS = r"C:\ProgramData\Archipelago\custom_worlds"
 
 MOD_FOLDER = "Archipelago"   # must match client.MOD_FOLDER
-MOD_VERSION = "0.3.0"
+MOD_VERSION = "0.4.0"
 LEGACY_FILES = ["{6F1D2A5C-3B8E-4C7A-9E21-5A0B7C4D8E13}" + ext for ext in (".zip", ".crc", ".manifest")]
 FALLBACK_GAME_VERSION = "EXE: 1186 DATA: 847"
 

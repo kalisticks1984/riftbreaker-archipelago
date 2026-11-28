@@ -20,9 +20,9 @@
 1. Open the client and connect it to the server with your slot name **before starting the game**. On connecting, the
    client writes this seed's item names into the mod. The game reads them when it starts, so if the game was already
    running, restart it.
-2. Start a **new open campaign**. A campaign is bound to the first slot that connects to it. Loading a campaign that
+2. Start a **new game in the slot's mode** (open campaign, story campaign, or survival on the slot's map). A campaign is bound to the first slot that connects to it. Loading a campaign that
    belongs to another slot or seed does nothing, and the client warns you.
-3. Leave the client running while you play. Research checks and the goal are sent automatically. Received items appear
+3. Leave the client running while you play. Checks and the goal are sent automatically. Received items appear
    within about two seconds, and the HUD shows "Archipelago: received …".
 
 ## Commands
@@ -35,3 +35,10 @@ Console commands in the game:
 - `ap_status`: show the Archipelago status.
 - `ap_research`: open the research screen.
 - `ap_hub`: place a free Communications Hub, for testing. The game only enables research while you own one.
+- `ap_tracker`: progress on each kind of check.
+- `ap_deposit <resource> <amount>`, `ap_withdraw <resource> <amount>` and `ap_energylink`: Energy Link.
+
+## Co-op
+
+The host runs the client and everyone shares the slot. Every player needs the mod in `<Riftbreaker>/mods/Archipelago/`.
+Only the host's research tree shows the per-seed item names.

@@ -10,7 +10,7 @@ import sys
 import zipfile
 
 WANTED_PREFIXES = (
-    "scripts/research/", "scripts/difficulty/", "logic/campaigns/open/", "gui/",
+    "scripts/research/", "scripts/difficulty/", "logic/campaigns/open/", "missions/survival/", "gui/",
 )
 
 

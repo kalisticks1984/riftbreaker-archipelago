@@ -1,44 +1,75 @@
 # The Riftbreaker
 
-## What does randomization do to this game?
+## Game modes
 
-This world uses the **open campaign**. Every check is in the research tree.
+Pick one with the `game_mode` option:
 
-Every research project except the free starting kit is a check. Researching one sends a check instead of giving you
-its buildings, weapons or upgrades. Those rewards are items in the multiworld.
+- **open:** the open campaign. You start in the Jungle, and the other seven biomes unlock through **Biome** items. You
+  also need the Planetary Scanner, from the "Orbital Scanning" item, to travel.
+- **story:** the base story campaign (no DLC). Biomes and missions unlock through the story as usual.
+- **survival:** one survival map, chosen with `survival_map`. You win by surviving the mission duration.
 
-Once the client has connected, each research node shows the item it sends, with the receiving player when it's for
-someone else. Its description says whether that item is progression, useful, filler or a trap.
+## What is a check?
 
-**Research is near-instant:** the mod sets the game's "Research time factor" difficulty setting to 0.01. Research
-still costs its listed resources. Only the time is removed.
+- **Research:** every research project except the free starting kit. Researching it sends the check instead of giving
+  you its buildings, weapons or upgrades. Once the client connects, each research node shows the item it sends, and
+  its description says whether that item is progression, useful, filler or a trap.
+- **Builds** (`build_checks`): Headquarters levels 3 to 7, Laboratory, Planetary Scanner, Rare Element Mine, and the
+  megastructures, whichever exist in the mode.
+- **Biome arrivals** (open, `biome_arrival_checks`): arriving in each non-Jungle biome for the first time.
+- **Story missions** (story, `mission_checks`): completing each of the 16 base story missions.
+- **Survival time** (survival, `survival_time_interval`): every N minutes survived, up to 90.
 
-**Progressive items:** research that comes in levels arrives in order. For example, the first Progressive Renewable
-Energy you receive is level 1, the second is level 2, and so on. This covers Headquarters, towers, energy, storage,
-megastructures and every other `lvl` family.
+Research that can never be done in a mode is left out. For example, a creature it needs may not live there.
 
-**Biomes:** the seven biomes other than the Jungle stay locked until their Biome item arrives. The Planetary Scanner no
-longer unlocks them. You still need the Planetary Scanner, which comes from the "Orbital Scanning" item, to travel.
+## Items
 
-## What is the goal?
+- **Research rewards:** leveled research (Headquarters, towers, energy, storage, megastructures and so on) arrives as
+  **progressive** items, granted in order.
+- **Biome items:** open campaign only.
+- **Filler:** resource caches of carbonium, ironium and cobalt.
 
-- **arcology** (default): complete the Arcology assembly.
-- **prime_rift**: build and activate the Prime Rift Station and return to Earth.
+## Goal
 
-## How is logic decided?
+- **Open and story:** `arcology` (complete the Arcology assembly) or `prime_rift` (return to Earth).
+- **Survival:** survive the full mission duration.
 
-A research check is in logic when you could pay for it and everything it depends on:
+## Other options
 
-- **Common ores:** cobalt, palladium, titanium and uranium need their Resource Handling item, plus access to a biome
-  that spawns them.
-- **Rare crystals:** these also need Rare Element Mining.
-- **Analysis:** needs the Laboratory, which is Progressive Alien Research #1.
-- **Building requirements:** research that needs a building already built needs that building's progressive level.
-  For example, Headquarters lvl. 5 research needs Progressive Headquarters ×2, which is the HQ lvl. 4 building.
-- **Familiarity:** research that needs familiarity with a creature or plant needs access to a biome where it lives.
+- **early_progression:** `early` or `local` places key progression (Orbital Scanning, Cobalt Handling, the
+  Laboratory, the first HQ upgrade) in sphere 1.
+- **energy_link:** shares resources and electricity through the multiworld's Energy Link pool. In the game console:
+  - `ap_deposit <resource> <amount>`
+  - `ap_withdraw <resource> <amount>`
+  - `ap_energylink`
+
+  Resources are carbonium, ironium, cobalt, palladium, titanium, uranium and energy. Rates in Energy Link units
+  (J) per unit:
+
+  | Resource | J per unit |
+  |---|---|
+  | Carbonium, ironium | 100 k |
+  | Cobalt | 500 k |
+  | Palladium, titanium | 1 M |
+  | Uranium | 2 M |
+  | Energy | 10 k |
+
+## Co-op
+
+Everyone in a co-op session shares one slot. Only the host runs the client. Rewards are granted to every player,
+and every player needs the mod installed.
 
 ## In game
 
-- The HUD shows "Archipelago: connected as …" when the client links up, and "Archipelago: received …" for each item.
-- Console `ap_status` shows the status again.
-- Console `ap_research` opens the research screen anywhere. Research only unlocks once you own a Communications Hub (the game hard-codes this); for testing, console `ap_hub` places one next to you for free.
+- **HUD messages:** "Archipelago: connected as …" and "Archipelago: received …".
+- **Console commands:**
+  - `ap_status`
+  - `ap_tracker`: progress on each kind of check, and how many are in logic.
+  - `ap_research`
+  - `ap_hub`: places a free Communications Hub for testing. Research only unlocks while you own one.
+- **Research speed:** research is near-instant. The game's "Research time factor" is set to 0.01, and costs are
+  unchanged.
+
+## Client
+
+The client's **Tracker** tab lists every check as done, in logic or locked. `/tracker` prints the non-research checks.

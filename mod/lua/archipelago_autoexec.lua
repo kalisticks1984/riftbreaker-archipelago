@@ -1,4 +1,5 @@
--- Archipelago for The Riftbreaker (open campaign). Run automatically by the game (lua/*_autoexec.lua).
+-- Archipelago for The Riftbreaker (open campaign, story campaign, survival). Run automatically by the game
+-- (lua/*_autoexec.lua). Only the host runs it: in co-op the host's game and client bridge one shared slot.
 if ( not is_server ) then
     return
 end
@@ -8,8 +9,8 @@ require("lua/archipelago/ap_data.lua")
 -- Attach the polling rule once per loaded map. A rule restored from a save registers itself
 -- (g_ap_rule_owner) in its OnLoad before players are initialized, so it is not added twice.
 local function AP_Attach()
-    -- The open campaign's type is "story"; the rule itself idles unless campaign_mode_open is set.
-    if ( CampaignService:GetCurrentCampaignType() ~= "story" ) then return end
+    local ctype = CampaignService:GetCurrentCampaignType()
+    if ( ctype ~= "story" and ctype ~= "survival" ) then return end   -- the open campaign's type is "story"
     if ( g_ap_rule_owner ~= nil ) then return end
     local ok, err = pcall(function()
         MissionService:AddGameRule( "lua/archipelago/ap_rule.lua", "" )
@@ -25,11 +26,18 @@ RegisterGlobalEventHandler("PlayerInitializedEvent", function(evt)
     AP_Attach()
 end)
 
--- Console: open the research screen anywhere (no Communications Hub needed).
+local function WithRule(fn)
+    if ( g_ap_rule_owner ~= nil ) then
+        fn(g_ap_rule_owner)
+    else
+        GuiService:ShowHudText("archipelago_status", "Archipelago: mod loaded, but not active in this game")
+    end
+end
+
+-- Console: open the research screen anywhere.
 ConsoleService:RegisterCommand("ap_research", function(args)
     local player = PlayerService:GetLeadingPlayer()
-    local mech = PlayerService:GetPlayerControlledEnt(player)
-    QueueEvent("OpenResearchRequest", mech, player)
+    QueueEvent("OpenResearchRequest", PlayerService:GetPlayerControlledEnt(player), player)
 end)
 
 -- Console (testing aid): place a finished Communications Hub next to the mech for free.
@@ -48,11 +56,22 @@ ConsoleService:RegisterCommand("ap_hub", function(args)
     GuiService:ShowHudText("archipelago_status", "Archipelago: Communications Hub placed")
 end)
 
--- Console: show the Archipelago status on the HUD.
 ConsoleService:RegisterCommand("ap_status", function(args)
-    if ( g_ap_rule_owner ~= nil ) then
-        g_ap_rule_owner:ShowStatus(g_ap_rule_owner:StatusText(), 8.0)
-    else
-        GuiService:ShowHudText("archipelago_status", "Archipelago: mod loaded, but not active in this campaign")
-    end
+    WithRule(function(rule) rule:ShowStatus(rule:StatusText(), 8.0) end)
+end)
+
+-- Console: non-research checks (builds, missions, arrivals, survival time) and what is in logic.
+ConsoleService:RegisterCommand("ap_tracker", function(args)
+    WithRule(function(rule) rule:ShowTracker() end)
+end)
+
+-- Console: Energy Link. ap_deposit / ap_withdraw <resource|energy> <amount>, ap_energylink.
+ConsoleService:RegisterCommand("ap_deposit", function(args)
+    WithRule(function(rule) rule:EnergyLinkRequest("deposit", args) end)
+end)
+ConsoleService:RegisterCommand("ap_withdraw", function(args)
+    WithRule(function(rule) rule:EnergyLinkRequest("withdraw", args) end)
+end)
+ConsoleService:RegisterCommand("ap_energylink", function(args)
+    WithRule(function(rule) rule:EnergyLinkStatus() end)
 end)
